@@ -107,7 +107,7 @@ class HarnessAdapter:
 ```
 
 ## 4. Tech Stack
-Python 3.11, asyncio, pydantic v2, FastAPI, sqlite3 stdlib M1 / SQLAlchemy+Postgres M5, OTel M5, HHEM-2.1-Open CPU, bge-m3 pinned, pytest, Ollama llama3/mistral, `cfa.yaml` + `thresholds.yaml` + `goldens/*.jsonl`.
+Python 3.11, asyncio, pydantic v2, FastAPI, sqlite3 stdlib M1 / SQLAlchemy+Postgres M5, OTel M5, HHEM-2.1-Open CPU, bge-m3 pinned, pytest, small models only `ollama/qwen2.5-coder:1.5b|3b` `ollama/gemma2:2b` local or `groq/qwen-2.5-coder-32b` `groq/gemma2-9b-it` via `GROQ_API_KEY`, `cfa.yaml` + `thresholds.yaml` + `goldens/*.jsonl`.
 
 ## 5. Workflow
 ```bash
