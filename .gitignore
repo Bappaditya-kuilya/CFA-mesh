@@ -1,5 +1,6 @@
 *.pyc
 __pycache__/
+*.db
 cfa.db
 cache/
 plan.md
