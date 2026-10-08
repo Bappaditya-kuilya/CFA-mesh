@@ -18,6 +18,38 @@ DEFAULT_DB = os.environ.get("CFA_DB", "cfa.db")
 DEFAULT_JSONL = os.environ.get("CFA_JSONL", "traces.jsonl")
 DEFAULT_TENANT = "default"
 
+# F2 budgets: per-trace caps + global run caps. Exceed -> abort
+# `budget_exceeded` FAIL. Pure check so M2 orchestrator + tests share it.
+BUDGETS = {
+    "max_tokens_per_trace": 8000,
+    "max_cost_usd": 0.05,
+    "timeout_s": 120,
+    "max_branches": 7,
+    "run_cap_pr_usd": 2.0,
+    "run_cap_nightly_usd": 20.0,
+}
+
+
+def over_budget(tokens_in: int = 0, tokens_out: int = 0,
+                cost_usd: float = 0.0, latency_s: float = 0.0,
+                branches: int = 0, run_cost_usd: float = 0.0,
+                tier: str = "pr") -> list:
+    """Return reason codes (empty == within budget)."""
+    reasons = []
+    if tokens_in + tokens_out > BUDGETS["max_tokens_per_trace"]:
+        reasons.append("tokens_exceeded")
+    if cost_usd > BUDGETS["max_cost_usd"]:
+        reasons.append("cost_exceeded")
+    if latency_s > BUDGETS["timeout_s"]:
+        reasons.append("timeout_exceeded")
+    if branches > BUDGETS["max_branches"]:
+        reasons.append("branches_exceeded")
+    cap = (BUDGETS["run_cap_nightly_usd"] if tier == "nightly"
+           else BUDGETS["run_cap_pr_usd"])
+    if run_cost_usd > cap:
+        reasons.append("budget_exceeded")
+    return reasons
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trajectories (
   trace_id TEXT PRIMARY KEY,
@@ -203,6 +235,31 @@ class Store:
             (trace_id, tenant_id)).fetchall()
         return {"trace_id": r[0], "task_id": r[1], "input": r[2], "output": r[3],
                 "spans": spans, "branches": branches}
+
+    def purge_older_than(self, days: int = 30) -> dict:
+        """Retention purge (§7.5, default 30d). Children first (FK-safe)."""
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                               time.gmtime(time.time() - days * 86400))
+        counts: dict = {}
+        try:
+            self._conn.execute("BEGIN IMMEDIATE;")
+            for table in ("spans", "branches", "verdicts"):
+                cur = self._conn.execute(
+                    f"DELETE FROM {table} WHERE trace_id IN "
+                    "(SELECT trace_id FROM trajectories WHERE created_at < ?)",
+                    (cutoff,))
+                counts[table] = cur.rowcount
+            cur = self._conn.execute(
+                "DELETE FROM trajectories WHERE created_at < ?", (cutoff,))
+            counts["trajectories"] = cur.rowcount
+            self._conn.execute("COMMIT;")
+            return counts
+        except Exception:
+            try:
+                self._conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+            raise
 
     def close(self):
         try:
