@@ -1,7 +1,9 @@
 *.pyc
 __pycache__/
 cfa.db
+cache/
 plan.md
 report.html
 results.json
 traces/
+traces.jsonl
