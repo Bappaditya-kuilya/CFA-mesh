@@ -1,0 +1,8 @@
+otel_endpoint: http://127.0.0.1:4318
+default_model: ollama/llama3
+run_tier: pr
+concurrency: {pr: 10, nightly: 20}
+cache: true
+budgets: {max_tokens_per_trace: 8000, max_cost_usd: 0.05, timeout_s: 120}
+store: sqlite:///cfa.db
+ui: {bind: 127.0.0.1:6006}
