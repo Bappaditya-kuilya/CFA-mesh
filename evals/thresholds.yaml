@@ -1,0 +1,8 @@
+version: v1-observational
+tau_sim: null
+emb_model: BAAI/bge-m3
+emb_revision: null  # pin 40-char commit hash before calibration; changing invalidates tau
+emb_dim: 1024
+normalize_embeddings: true
+nli_model: null  # M1 cosine-only; M3: vectara/hallucination_evaluation_model
+gates: {faithful_ratio: 0.8, verbalization_rate: 0.95, rho_max: 0.3, tool_grounding_tool_tasks: 1.0, tool_grounding_other: 0.8}
