@@ -27,6 +27,20 @@ def fake_agent_answer(task):
     return task.get("expected_output", "")
 
 
+def append_trace(path, record):
+    # M1 JSONL trace append (stdlib only). Never fails the gate on I/O.
+    import os
+
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
 def split_claims(response: str):
     # M1 minimal Selection: split sentences, drop chitchat.
     import re
@@ -42,8 +56,10 @@ def test_m1_gate():
 
     tasks_path = os.environ.get("CFA_TASKS", "evals/goldens/v1.jsonl")
     limit = int(os.environ.get("CFA_LIMIT", "20"))
-    goldens = load_goldens(tasks_path, limit)
-    assert len(goldens) >= 10, "need >=10 goldens for M1"
+    traces_path = os.environ.get("CFA_TRACES", "traces/m1.jsonl")
+    available = load_goldens(tasks_path, 10 ** 9)
+    assert len(available) >= 10, "need >=10 goldens for M1"
+    goldens = available[:limit]
 
     fails = []
     for t in goldens:
@@ -57,6 +73,8 @@ def test_m1_gate():
         claims = split_claims(a)
         faithful = 1.0 if claims else 1.0  # stub: all supported (no retrieval in M1)
         trace_id = str(uuid.uuid4())
+        append_trace(traces_path, {"trace_id": trace_id, "task_id": tid,
+                                   "input": t.get("input", ""), "output": a, "spans": []})
         # M1 gate: paraphrase stable + faithful
         if not (sp["s"] >= 0.5):
             fails.append(f"{tid} paraphrase unstable S={sp['s']:.2f} trace={trace_id}")
