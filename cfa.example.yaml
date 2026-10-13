@@ -15,9 +15,12 @@ provider:
   base_url: http://localhost:11434/v1  # groq: https://api.groq.com/openai/v1 | google: https://generativelanguage.googleapis.com/v1beta/openai/
   api_key_env: ""  # groq: GROQ_API_KEY | google: GOOGLE_API_KEY | empty = local, no key sent
   timeout_s: 120
-run_tier: pr
-concurrency: {pr: 10, nightly: 20}
+run_tier: pr  # orchestrator.TIER_POLICY key: pr|nightly
+# Key name mirrors TIER_POLICY[tier]["concurrent"] in orchestrator.py.
+concurrent: {pr: 10, nightly: 20}
 cache: true
-budgets: {max_tokens_per_trace: 8000, max_cost_usd: 0.05, timeout_s: 120}
+# Keys mirror orchestrator.BUDGETS: max_tokens_per_trace, max_cost_usd,
+# timeout_s, max_branches + run_cap_usd per tier.
+budgets: {max_tokens_per_trace: 8000, max_cost_usd: 0.05, timeout_s: 120, max_branches: 7, run_cap_usd: {pr: 2.0, nightly: 20.0}}
 store: sqlite:///cfa.db
 ui: {bind: 127.0.0.1:6006}

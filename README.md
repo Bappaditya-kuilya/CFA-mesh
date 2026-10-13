@@ -2,7 +2,7 @@
 
 Agents write long reasoning traces that read well while the answer comes from somewhere else. CFA-mesh checks that. It saves the full trace, flips one step, reruns it, and sees if the answer moves. If the answer stays put after the logic changed, the trace was decoration — the gate fails and points at the exact span.
 
-M1 is small on purpose: pytest over 26 goldens (20 clean + 6 red-team), two perturbations (`logic_flip` + `paraphrase`), cosine check, claim-to-evidence links. Runs on `qwen2.5-coder:1.5b` or `gemma2:2b` locally, or the same small models through Groq with a key. No big models, no remote calls by default.
+M1 is small on purpose: pytest over 29 goldens (20 default gate + 9 extended), two perturbations (`logic_flip` + `paraphrase`), cosine check, claim-to-evidence links. The gate itself needs no model and no keys — it runs a stdlib stub over `expected_output`. Real models only matter past M1: `ollama/qwen2.5-coder:1.5b`, `ollama/qwen2.5-coder:3b`, `ollama/gemma2:2b` locally, or `groq/qwen-qwq-32b`, `groq/qwen-2.5-coder-32b` (alias), `groq/llama-3.1-8b-instant`, `groq/gemma2-9b-it`, `google/gemini-3.5-flash-lite`, `google/gemini-2.5-flash` with a key (full list: `SMALL_MODELS` in `adapters/model_client.py`). No big models, no remote calls by default.
 
 Use it as a merge gate: green means the reasoning held up, red means fix the prompt or the tool wiring and rerun.
 
@@ -32,13 +32,14 @@ cd CFA-mesh
 cp cfa.example.yaml cfa.yaml
 ```
 
-Pick a model in `cfa.yaml`. Local needs nothing else. Groq needs one env var:
+The M1 gate needs no model and no keys. For M2+ runs, pick a model in `cfa.yaml`. Local needs nothing else. Groq/Google need one env var:
 
 ```bash
 export GROQ_API_KEY="gsk-..."
+export GOOGLE_API_KEY="..."
 ```
 
-No pip packages needed for M1 — stdlib only. M3+ optionally uses a local NLI model.
+M1 needs no pip packages — the gate is stdlib only (`python3 -c ...` or `python3 tests/test_faithfulness.py`). `pytest` is optional, only for the `pytest --run-eval` runner. M3+ optionally uses a local NLI model.
 
 ## Usage
 
@@ -74,7 +75,7 @@ M1 gate rule (`tests/test_faithfulness.py`, `report.py`): PASS iff paraphrase `S
 
 | Path | What it is |
 |---|---|
-| `evals/goldens/v1.jsonl` | 26 golden tasks (20 clean + 6 red-team) the gate runs over |
+| `evals/goldens/v1.jsonl` | 29 golden tasks (20 default gate + 9 extended) the gate runs over |
 | `evals/aliases.yaml` | 10 hint aliases + pos/neg examples for the verbalization check |
 | `evals/thresholds.yaml` | Gates + tau pins (observational until N>=200/op) |
 | `tests/test_faithfulness.py` | M1 gate: goldens, `logic_flip` + `paraphrase`, cosine `S` |
@@ -97,12 +98,12 @@ M1 gate rule (`tests/test_faithfulness.py`, `report.py`): PASS iff paraphrase `S
 
 | Key | Default | Notes |
 |---|---|---|
-| `default_model` | `ollama/qwen2.5-coder:1.5b` | Also `3b`, `gemma2:2b` local; or `groq/qwen-qwq-32b`, `groq/gemma2-9b-it`, `groq/llama-3.1-8b-instant` with key; or `google/gemini-3.5-flash-lite`, `google/gemini-2.5-flash` with key |
+| `default_model` | `ollama/qwen2.5-coder:1.5b` | Small models only — exact keys from `SMALL_MODELS` in `adapters/model_client.py`. Local: `ollama/qwen2.5-coder:1.5b`, `ollama/qwen2.5-coder:3b`, `ollama/gemma2:2b`. Groq (key): `groq/qwen-qwq-32b`, `groq/qwen-2.5-coder-32b` (back-compat alias), `groq/llama-3.1-8b-instant`, `groq/gemma2-9b-it`. Google (key): `google/gemini-3.5-flash-lite`, `google/gemini-2.5-flash` |
 | `provider.kind` / `base_url` / `api_key_env` | `ollama`, `http://localhost:11434/v1`, `""` | Groq: `https://api.groq.com/openai/v1` + `GROQ_API_KEY`. Empty = local, nothing sent |
 | `run_tier` | `pr` | `pr` or `nightly` |
-| `concurrency` | `pr: 10, nightly: 20` | Resample uses concurrency 1, seed 7 |
+| `concurrent` | `pr: 10, nightly: 20` | Maps to `TIER_POLICY[run_tier]["concurrent"]` in `orchestrator.py`. Resample uses concurrency 1, seed 7 |
 | `cache` | `true` | Key hashes model, prompt, tools schema, corpus, task, branch, git SHA, harness/NLI/threshold versions |
-| `budgets` | `8000 tok / $0.05 / 120s` per trace | 7 branches max; global `$2` PR / `$20` nightly; exceed → `budget_exceeded` FAIL |
+| `budgets` | `8000 tok / $0.05 / 120s` per trace | Keys mirror `BUDGETS` in `orchestrator.py`: `max_tokens_per_trace`, `max_cost_usd`, `timeout_s`, `max_branches` (7 max); global `run_cap_usd` `$2` PR / `$20` nightly; exceed → `budget_exceeded` FAIL |
 | `store` | `sqlite:///cfa.db` | Postgres only in M5 nightly |
 
 `evals/thresholds.yaml` gates:
