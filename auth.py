@@ -57,14 +57,23 @@ def hash_key(key: str) -> str:
 
 
 def verify_bearer(provided: str, expected_hash: str) -> bool:
-    """Constant-time bearer check. Never touches raw stored secrets."""
+    """Constant-time bearer check. Never touches raw stored secrets.
+
+    Always burns a compare_digest (even on empty/invalid input) so
+    valid vs unknown tokens are timing-indistinguishable (no oracle).
+    """
+    _dummy = "0" * 64
+    _exp = (expected_hash if isinstance(expected_hash, str)
+            and len(expected_hash) == 64 else _dummy)
     if not isinstance(provided, str) or not provided:
+        hmac.compare_digest(_dummy, _exp)
         return False
     try:
         digest = hash_key(provided)
     except Exception:
+        hmac.compare_digest(_dummy, _exp)
         return False
-    return hmac.compare_digest(digest, expected_hash)
+    return hmac.compare_digest(digest, _exp)
 
 
 def can(role: str, action: str) -> bool:
@@ -139,7 +148,11 @@ class AuthStore:
         self._conn.commit()
         return cur.rowcount
 
-    # -- lockout: persistent counter, 5 fails / 5 min ----------------------
+    # -- lockout: persistent counter, 5 fails / 5 min, keyed per-IP --------
+    # key_id column stores the client IP (not token hash): attackers
+    # rotating tokens from one IP still trip the counter, and one bad
+    # IP never locks out other clients. Param names keep back-compat
+    # (old callers passed a token hash positionally).
     def record_failure(self, key_id: str, now: float | None = None) -> None:
         now = time.time() if now is None else now
         self._conn.execute("DELETE FROM auth_failures WHERE attempted_at < ?",
@@ -165,27 +178,35 @@ class AuthStore:
         return self.recent_failures(key_id, now) >= MAX_FAILS
 
     # -- authenticate ------------------------------------------------------
-    def authenticate(self, bearer: str, now: float | None = None) -> dict:
+    def authenticate(self, bearer: str, now: float | None = None,
+                     ip: str = "unknown",
+                     client_ip: str | None = None) -> dict:
         """Returns {tenant_id, role, kind, user_id} or raises.
 
-        Unknown/revoked/wrong tokens count as failures under the
-        sha256 of the presented token (slows targeted brute force).
+        Lockout is keyed per client IP (not per token hash): ``ip`` /
+        ``client_ip`` selects the counter. Both branches (known and
+        unknown token) run the same constant-time ``verify_bearer``
+        compare so timing reveals nothing (no oracle).
         """
         now = time.time() if now is None else now
-        kid = hash_key(bearer) if isinstance(bearer, str) else ""
-        if self.is_locked_out(kid, now):
+        lock_key = client_ip if client_ip is not None else ip
+        if not isinstance(lock_key, str) or not lock_key:
+            lock_key = "unknown"
+        if self.is_locked_out(lock_key, now):
             raise LockedOut("locked out: 5 fails / 5min")
+        kid = hash_key(bearer) if isinstance(bearer, str) and bearer else ""
         cur = self._conn.execute(
             "SELECT key_hash,kind,tenant_id,user_id,role,revoked FROM api_keys"
             " WHERE key_hash=?", (kid,))
         row = cur.fetchone()
-        ok = (row is not None and not row[5]
-              and verify_bearer(bearer, row[0]))
+        stored = row[0] if row is not None else ("0" * 64)
+        match = verify_bearer(bearer, stored)
+        ok = (row is not None and not row[5] and match)
         if not ok:
-            self.record_failure(kid, now)
-            if self.is_locked_out(kid, now):
+            self.record_failure(lock_key, now)
+            if self.is_locked_out(lock_key, now):
                 raise LockedOut("locked out: 5 fails / 5min")
             raise AuthError("invalid bearer")
-        self.clear_failures(kid)
+        self.clear_failures(lock_key)
         return {"tenant_id": row[2], "role": row[4], "kind": row[1],
                 "user_id": row[3]}

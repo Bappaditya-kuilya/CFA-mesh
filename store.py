@@ -144,10 +144,30 @@ class Store:
         rec["_fallback"] = True
         return rec
 
+    def _guard_cross_tenant(self, table: str, row: dict) -> None:
+        """Deny INSERT OR REPLACE that would overwrite another tenant's row."""
+        pk_of = {"trajectories": "trace_id", "spans": "span_id",
+                 "branches": "branch_id", "verdicts": "trace_id"}
+        pk = pk_of.get(table)
+        if not pk or pk not in row or "tenant_id" not in row:
+            return
+        try:
+            cur = self._conn.execute(
+                f"SELECT tenant_id FROM {table} WHERE {pk}=?",
+                (row[pk],))
+            r = cur.fetchone()
+        except Exception:
+            return
+        if r is not None and r[0] != row["tenant_id"]:
+            raise ValueError(
+                f"cross-tenant overwrite denied: {table}.{pk}="
+                f"{row[pk]!r} owned by tenant {r[0]!r}")
+
     def _insert(self, table: str, row: dict) -> dict:
         cols = ",".join(row.keys())
         qs = ",".join("?" for _ in row)
         try:
+            self._guard_cross_tenant(table, row)
             self._conn.execute("BEGIN IMMEDIATE;")
             self._conn.execute(f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({qs})",
                                tuple(row.values()))
@@ -168,9 +188,11 @@ class Store:
                "output": output, "tenant_id": tenant_id, "created_at": _now()}
         out = self._insert("trajectories", row)
         # Always mirror the M1 JSONL record per F1: {trace_id,task_id,input,output,spans}
+        # P2: tenant_id rides along so the mirror stays tenant-attributed.
         with open(self.jsonl_path, "a") as f:
             f.write(json.dumps({"trace_id": trace_id, "task_id": task_id,
                                 "input": input, "output": output,
+                                "tenant_id": tenant_id,
                                 "spans": spans or []}) + "\n")
         for s in (spans or []):
             self.save_span(trace_id=trace_id, tenant_id=tenant_id, **s)
@@ -236,21 +258,38 @@ class Store:
         return {"trace_id": r[0], "task_id": r[1], "input": r[2], "output": r[3],
                 "spans": spans, "branches": branches}
 
-    def purge_older_than(self, days: int = 30) -> dict:
-        """Retention purge (§7.5, default 30d). Children first (FK-safe)."""
+    def purge_older_than(self, days: int = 30,
+                           tenant_id: str | None = None) -> dict:
+        """Retention purge (§7.5, default 30d). Children first (FK-safe).
+
+        When tenant_id is given only that tenant's rows are purged;
+        None (legacy) purges all tenants.
+        """
         cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                time.gmtime(time.time() - days * 86400))
         counts: dict = {}
         try:
             self._conn.execute("BEGIN IMMEDIATE;")
             for table in ("spans", "branches", "verdicts"):
-                cur = self._conn.execute(
-                    f"DELETE FROM {table} WHERE trace_id IN "
-                    "(SELECT trace_id FROM trajectories WHERE created_at < ?)",
-                    (cutoff,))
+                if tenant_id is None:
+                    cur = self._conn.execute(
+                        f"DELETE FROM {table} WHERE trace_id IN "
+                        "(SELECT trace_id FROM trajectories WHERE created_at < ?)",
+                        (cutoff,))
+                else:
+                    cur = self._conn.execute(
+                        f"DELETE FROM {table} WHERE tenant_id=? AND trace_id IN "
+                        "(SELECT trace_id FROM trajectories WHERE created_at < ?"
+                        " AND tenant_id=?)",
+                        (tenant_id, cutoff, tenant_id))
                 counts[table] = cur.rowcount
-            cur = self._conn.execute(
-                "DELETE FROM trajectories WHERE created_at < ?", (cutoff,))
+            if tenant_id is None:
+                cur = self._conn.execute(
+                    "DELETE FROM trajectories WHERE created_at < ?", (cutoff,))
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM trajectories WHERE created_at < ?"
+                    " AND tenant_id=?", (cutoff, tenant_id))
             counts["trajectories"] = cur.rowcount
             self._conn.execute("COMMIT;")
             return counts

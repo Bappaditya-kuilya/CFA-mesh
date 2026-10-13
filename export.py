@@ -10,6 +10,43 @@ import datetime
 import json
 import pathlib
 
+from scrub import scrub_span as _scrub_span_dict
+from scrub import scrub_text as _scrub_text
+
+
+def _scrub_str(s) -> str:
+    if s is None:
+        return ""
+    clean, _ = _scrub_text(s if isinstance(s, str) else str(s))
+    return clean
+
+
+def _check_tenant_scope(verdicts, spans=None, evidence_bank=None,
+                        tenant_id: str | None = None) -> None:
+    """Deny cross-tenant exports. Explicit tenant_id pins scope;
+    without it, mixed-tenant verdict sets are rejected."""
+    tenants = {v.get("tenant_id") for v in verdicts
+               if isinstance(v, dict) and v.get("tenant_id") is not None}
+    if tenant_id is not None:
+        for v in verdicts:
+            if (isinstance(v, dict) and v.get("tenant_id") is not None
+                    and v["tenant_id"] != tenant_id):
+                raise ValueError(
+                    f"cross-tenant export denied: verdict {v.get('task_id')!r}"
+                    f" tenant {v.get('tenant_id')!r} != {tenant_id!r}")
+        for coll in (spans, evidence_bank):
+            items = (coll.values() if isinstance(coll, dict)
+                     else (coll or []))
+            for s in items:
+                if (isinstance(s, dict) and s.get("tenant_id") is not None
+                        and s["tenant_id"] != tenant_id):
+                    raise ValueError(
+                        "cross-tenant export denied: span/evidence tenant"
+                        f" {s.get('tenant_id')!r} != {tenant_id!r}")
+    elif len(tenants) > 1:
+        raise ValueError(
+            f"cross-tenant export denied: mixed tenants {sorted(tenants)!r}")
+
 
 def _span_text(span):
     if isinstance(span, str):
@@ -20,13 +57,17 @@ def _span_text(span):
     return json.dumps(span, sort_keys=True)
 
 
-def materialize_evidence(verdict, spans=None, evidence_bank=None):
+def materialize_evidence(verdict, spans=None, evidence_bank=None,
+                         tenant_id: str | None = None):
     """Inline FAIL evidence: claims + resolved span contents.
 
     verdict: {claims?[{text,verdict,evidence_span_ids?}], ...}.
     spans: {span_id: span-dict-or-text} or [span...] with span_id keys.
     evidence_bank: [{evidence_id,task_id,kind,content_hash,content?}].
     Returns list of {text, verdict, evidence[{span_id, content}]}.
+    All span/bank contents are scrubbed (L1) before embedding; when
+    tenant_id is given, out-of-tenant spans/bank rows never resolve
+    (yield "<missing...>").
     """
     span_map = {}
     if isinstance(spans, dict):
@@ -37,6 +78,11 @@ def materialize_evidence(verdict, spans=None, evidence_bank=None):
                 span_map[s["span_id"]] = s
     bank_map = {}
     for row in (evidence_bank or []):
+        if not isinstance(row, dict):
+            continue
+        if (tenant_id is not None and row.get("tenant_id") is not None
+                and row["tenant_id"] != tenant_id):
+            continue
         key = row.get("evidence_id") or row.get("content_hash")
         if key:
             bank_map[key] = row.get("content", "")
@@ -45,21 +91,37 @@ def materialize_evidence(verdict, spans=None, evidence_bank=None):
         ev = []
         for sid in (claim.get("evidence_span_ids") or []):
             if sid in span_map:
-                content = _span_text(span_map[sid])
+                raw = span_map[sid]
+                if (tenant_id is not None and isinstance(raw, dict)
+                        and raw.get("tenant_id") is not None
+                        and raw["tenant_id"] != tenant_id):
+                    content = "<missing: id without materialized span>"
+                else:
+                    if isinstance(raw, dict):
+                        scrubbed, _ = _scrub_span_dict(raw)
+                        content = _span_text(scrubbed)
+                    else:
+                        content = _scrub_str(raw)
             elif sid in bank_map:
-                content = bank_map[sid]
+                content = _scrub_str(bank_map[sid])
             else:
                 content = "<missing: id without materialized span>"
             ev.append({"span_id": sid, "content": content})
-        out.append({"text": claim.get("text", ""),
+        out.append({"text": _scrub_str(claim.get("text", "")),
                     "verdict": claim.get("verdict", "UNVERIFIABLE"),
                     "evidence": ev})
     return out
 
 
 def build_export(*, gate, agg, verdicts, versions, spans=None,
-                 evidence_bank=None):
-    """Build {markdown, jsonl_rows}. FAIL rows carry materialized evidence."""
+                 evidence_bank=None, tenant_id: str | None = None):
+    """Build {markdown, jsonl_rows}. FAIL rows carry materialized evidence.
+
+    Tenant scope is enforced (cross-tenant sets raise); span contents
+    are L1-scrubbed before embedding so exports never leak live keys.
+    """
+    _check_tenant_scope(verdicts, spans=spans,
+                        evidence_bank=evidence_bank, tenant_id=tenant_id)
     span_map = spans if isinstance(spans, dict) else None
     md = []
     badge = gate.get("mode", "observational")
@@ -90,7 +152,8 @@ def build_export(*, gate, agg, verdicts, versions, spans=None,
         failed = v.get("verdict") in ("FAIL", "CONTRADICTED") \
             or "CONTRADICTED" in (v.get("claim_verdicts") or [])
         evidence = materialize_evidence(v, spans=spans,
-                                        evidence_bank=evidence_bank) \
+                                        evidence_bank=evidence_bank,
+                                        tenant_id=tenant_id) \
             if failed else []
         rows.append({**v, "fail_evidence": evidence,
                      "gate_decision": gate.get("decision"),
@@ -113,12 +176,18 @@ def build_export(*, gate, agg, verdicts, versions, spans=None,
     return {"markdown": markdown, "jsonl": jsonl, "rows": rows}
 
 
-def write_export(base_path, bundle, *, spans=None, evidence_bank=None):
-    """Write <base>.md + <base>.jsonl. bundle holds gate/agg/verdicts/versions."""
+def write_export(base_path, bundle, *, spans=None, evidence_bank=None,
+                 tenant_id: str | None = None):
+    """Write <base>.md + <base>.jsonl. bundle holds gate/agg/verdicts/versions.
+
+    Spans are L1-scrubbed via build_export before any byte hits disk;
+    tenant_id pins scope (cross-tenant sets raise).
+    """
     out = build_export(gate=bundle.get("gate", {}), agg=bundle.get("agg", {}),
                        verdicts=bundle.get("verdicts", []),
                        versions=bundle.get("versions", {}),
-                       spans=spans, evidence_bank=evidence_bank)
+                       spans=spans, evidence_bank=evidence_bank,
+                       tenant_id=tenant_id or bundle.get("tenant_id"))
     base = pathlib.Path(base_path)
     md_path = base.with_suffix(".md")
     jsonl_path = pathlib.Path(str(base) + ".jsonl")

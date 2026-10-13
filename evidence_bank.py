@@ -27,10 +27,12 @@ CREATE TABLE IF NOT EXISTS evidence_bank (
   kind TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   content TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT 'default',
   pinned_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_task ON evidence_bank(task_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_hash ON evidence_bank(content_hash);
+CREATE INDEX IF NOT EXISTS idx_evidence_tenant ON evidence_bank(tenant_id);
 """
 
 
@@ -41,6 +43,17 @@ def _now() -> str:
 def ensure_bank(conn: sqlite3.Connection) -> None:
     """Create the evidence_bank table/indexes if missing (idempotent)."""
     conn.executescript(BANK_SCHEMA)
+    # Migrate pre-P2 DBs lacking tenant_id.
+    try:
+        cols = [r[1] for r in conn.execute(
+            "PRAGMA table_info(evidence_bank)").fetchall()]
+        if "tenant_id" not in cols:
+            conn.execute("ALTER TABLE evidence_bank ADD COLUMN "
+                         "tenant_id TEXT NOT NULL DEFAULT 'default'")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_tenant "
+                         "ON evidence_bank(tenant_id)")
+    except Exception:
+        pass
 
 
 def _conn_of(target) -> sqlite3.Connection:
@@ -54,7 +67,8 @@ def _conn_of(target) -> sqlite3.Connection:
 
 
 def pin_evidence(target, task_id: str, kind: str, content: str,
-                 evidence_id: str | None = None) -> dict:
+                 evidence_id: str | None = None,
+                 tenant_id: str = "default") -> dict:
     """INSERT-only pin of one evidence row. Returns the inserted row dict.
 
     Raises sqlite3.IntegrityError on duplicate evidence_id (no REPLACE).
@@ -67,6 +81,7 @@ def pin_evidence(target, task_id: str, kind: str, content: str,
         "kind": kind,
         "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "content": content,
+        "tenant_id": tenant_id or "default",
         "pinned_at": _now(),
     }
     cols = ",".join(row.keys())
@@ -91,41 +106,65 @@ def pin_evidence(target, task_id: str, kind: str, content: str,
     return row
 
 
-def get_evidence(target, evidence_id: str) -> dict | None:
+def get_evidence(target, evidence_id: str,
+                 tenant_id: str | None = None) -> dict | None:
     conn = _conn_of(target)
     ensure_bank(conn)
-    cur = conn.execute(
-        "SELECT evidence_id,task_id,kind,content_hash,content,pinned_at"
-        " FROM evidence_bank WHERE evidence_id=?",
-        (evidence_id,),
-    )
+    if tenant_id is None:
+        cur = conn.execute(
+            "SELECT evidence_id,task_id,kind,content_hash,content,"
+            "tenant_id,pinned_at"
+            " FROM evidence_bank WHERE evidence_id=?",
+            (evidence_id,),
+        )
+    else:
+        cur = conn.execute(
+            "SELECT evidence_id,task_id,kind,content_hash,content,"
+            "tenant_id,pinned_at"
+            " FROM evidence_bank WHERE evidence_id=? AND tenant_id=?",
+            (evidence_id, tenant_id),
+        )
     r = cur.fetchone()
     if not r:
         return None
     return dict(zip(("evidence_id", "task_id", "kind", "content_hash",
-                     "content", "pinned_at"), r))
+                     "content", "tenant_id", "pinned_at"), r))
 
 
-def list_for_task(target, task_id: str) -> list[dict]:
+def list_for_task(target, task_id: str,
+                  tenant_id: str | None = None) -> list[dict]:
     """All pinned evidence rows for one task (gate-time export source)."""
     conn = _conn_of(target)
     ensure_bank(conn)
-    cur = conn.execute(
-        "SELECT evidence_id,task_id,kind,content_hash,content,pinned_at"
-        " FROM evidence_bank WHERE task_id=? ORDER BY pinned_at",
-        (task_id,),
-    )
+    if tenant_id is None:
+        cur = conn.execute(
+            "SELECT evidence_id,task_id,kind,content_hash,content,"
+            "tenant_id,pinned_at"
+            " FROM evidence_bank WHERE task_id=? ORDER BY pinned_at",
+            (task_id,),
+        )
+    else:
+        cur = conn.execute(
+            "SELECT evidence_id,task_id,kind,content_hash,content,"
+            "tenant_id,pinned_at"
+            " FROM evidence_bank WHERE task_id=? AND tenant_id=? "
+            "ORDER BY pinned_at",
+            (task_id, tenant_id),
+        )
     return [dict(zip(("evidence_id", "task_id", "kind", "content_hash",
-                      "content", "pinned_at"), r)) for r in cur.fetchall()]
+                      "content", "tenant_id", "pinned_at"), r))
+            for r in cur.fetchall()]
 
 
-def export_fail_bundle(target, task_id: str) -> str:
+def export_fail_bundle(target, task_id: str,
+                       tenant_id: str | None = None) -> str:
     """Materialize FAIL evidence for one task as self-contained JSONL.
 
     Per F7 the gate export must be replayable from the bundle alone
     (UI link is convenience only), so each line carries its content_hash.
+    When tenant_id is given only that tenant's rows are exported.
     """
-    rows = list_for_task(target, task_id)
+    rows = list_for_task(target, task_id, tenant_id=tenant_id)
     return "".join(json.dumps(r) + "\n" for r in rows)
 
 

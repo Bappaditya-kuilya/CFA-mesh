@@ -23,11 +23,16 @@ DENYLIST_KEYS = ("password", "secret", "api_key", "auth", "bearer",
                  "token", "session", "cookie")
 
 _KEY_ALT = r"password|secret|api[_-]?key|auth|bearer|token|session|cookie"
+# NOTE: leading boundary is (?<![A-Za-z0-9]) — not \b — so GROQ_API_KEY
+# still matches on its API_KEY tail (underscore is a \w char, \b fails).
 _DENY_RE = re.compile(
-    r"(?i)\b(%s)\b(\s*[:=]\s*)(['\"]?)(.+?)\3(?=\s|,|\}|;|$)" % _KEY_ALT)
+    r"(?i)(?<![A-Za-z0-9])(%s)(?![A-Za-z0-9])(\s*[:=]\s*)(['\"]?)(.+?)\3(?=\s|,|\}|;|$)" % _KEY_ALT)
 
 _PATTERNS: list = [
     ("SECRET", re.compile(r"sk-[A-Za-z0-9\-_]{8,}")),
+    ("SECRET", re.compile(r"gsk_[A-Za-z0-9\-_]{8,}")),
+    ("SECRET", re.compile(r"AIza[0-9A-Za-z\-_]{35}")),
+    ("SECRET", re.compile(r"AQ\.[A-Za-z0-9\-_]{8,}")),
     ("SECRET", re.compile(r"AKIA[0-9A-Z]{16}")),
     ("SECRET", re.compile(r"ghp_[A-Za-z0-9]{8,}")),
     ("SECRET", re.compile(r"xox[bpas]-[A-Za-z0-9\-]+")),
@@ -84,11 +89,17 @@ def scrub_text(text: str | None, span_id: str = "") -> tuple[str, list]:
 
 
 def scrub_span(span: dict, span_id: str = "") -> tuple[dict, list]:
-    """Scrub the free-text fields of a span dict (input/output/args/result)."""
+    """Scrub the free-text fields of a span dict.
+
+    Covers input/output/args/result plus name/model/session/tool_name
+    so live keys smuggled into metadata never reach the export.
+    """
     sid = span_id or str(span.get("span_id", ""))
     out = dict(span)
     log: list = []
-    for field in ("input", "output", "args_json", "result_json"):
+    for field in ("input", "output", "args_json", "result_json",
+                  "name", "model", "session_id", "session",
+                  "tool_name"):
         if field in out and out[field] is not None:
             clean, entries = scrub_text(out[field], span_id=sid)
             out[field] = clean
