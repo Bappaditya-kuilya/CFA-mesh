@@ -263,6 +263,142 @@ def test_report_custom_out_trace_links_resolve():
                    for h in hrefs), hrefs
 
 
+def test_model_client_misroute_raises():
+    from adapters import model_client
+    old = os.environ.get("GROQ_API_KEY")
+    os.environ["GROQ_API_KEY"] = "dummy"
+    try:
+        cfg = model_client.resolve("groq/some-new-model")
+        assert cfg["kind"] == "groq", cfg
+        try:
+            model_client.resolve("bogusprefix/some-model")
+            raise AssertionError("unknown prefix must raise")
+        except RuntimeError as e:
+            assert "bogusprefix" in str(e) and "groq" in str(e), str(e)
+    finally:
+        if old is None:
+            os.environ.pop("GROQ_API_KEY", None)
+        else:
+            os.environ["GROQ_API_KEY"] = old
+
+
+def test_model_client_error_redaction():
+    import io
+    import urllib.error
+    import urllib.request
+    from adapters import model_client
+    sentinel = "sk-test-sentinel-9f8e7d6c5b4a"
+    old = os.environ.get("GROQ_API_KEY")
+    os.environ["GROQ_API_KEY"] = sentinel
+    real = urllib.request.urlopen
+
+    def boom(req, timeout=None):
+        raise urllib.error.HTTPError(
+            req.full_url, 401, "Unauthorized", {},
+            io.BytesIO(b"bad-key " + b"x" * 2000))
+    urllib.request.urlopen = boom
+    try:
+        try:
+            model_client.complete("groq/llama-3.1-8b-instant", "hi",
+                                  max_tokens=8)
+            raise AssertionError("HTTPError must surface as RuntimeError")
+        except RuntimeError as e:
+            msg = str(e)
+            assert sentinel not in msg, "key must never appear in error"
+            assert "Authorization" not in msg, msg
+            assert "401" in msg, msg
+            body_part = msg.split("body:", 1)[1]
+            assert len(body_part.strip()) <= 500, len(body_part)
+
+        def empty_ok(req, timeout=None):
+            class R:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def read(self):
+                    return b'{"nope": 1}'
+            return R()
+        urllib.request.urlopen = empty_ok
+        try:
+            model_client.complete("ollama/qwen2.5-coder:1.5b", "hi",
+                                  max_tokens=8)
+            raise AssertionError("malformed choices must raise")
+        except RuntimeError as e:
+            assert "choices" in str(e), str(e)
+    finally:
+        urllib.request.urlopen = real
+        if old is None:
+            os.environ.pop("GROQ_API_KEY", None)
+        else:
+            os.environ["GROQ_API_KEY"] = old
+
+
+def test_model_client_usage_dict():
+    import urllib.request
+    from adapters import model_client
+    real = urllib.request.urlopen
+
+    def fake(payload):
+        def run(req, timeout=None):
+            assert timeout == 120, timeout
+
+            class R:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def read(self):
+                    return json.dumps(payload).encode()
+            return R()
+        return run
+    try:
+        urllib.request.urlopen = fake(
+            {"choices": [{"message": {"content": "hello"}}],
+             "usage": {"prompt_tokens": 5, "completion_tokens": 7}})
+        out = model_client.complete_with_usage(
+            "ollama/qwen2.5-coder:1.5b", "hi", max_tokens=8)
+        assert set(out) == {"text", "tokens_in", "tokens_out",
+                            "elapsed_s"}, out
+        assert out["text"] == "hello", out
+        assert out["tokens_in"] == 5 and out["tokens_out"] == 7, out
+        assert out["elapsed_s"] >= 0, out
+        urllib.request.urlopen = fake(
+            {"choices": [{"message": {"content": "hi"}}]})
+        out2 = model_client.complete_with_usage(
+            "ollama/qwen2.5-coder:1.5b", "hi", max_tokens=8)
+        assert out2["tokens_in"] == 0 and out2["tokens_out"] == 0, out2
+        urllib.request.urlopen = fake(
+            {"choices": [{"message": {"content": "wrap"}}]})
+        assert model_client.complete(
+            "ollama/qwen2.5-coder:1.5b", "hi", max_tokens=8) == "wrap"
+    finally:
+        urllib.request.urlopen = real
+
+
+def test_model_client_dotenv_missing_only():
+    from adapters import model_client
+    new_k, exist_k = "CFA_MESH_TEST_NEW_X1", "CFA_MESH_TEST_EXIST_X1"
+    for k in (new_k, exist_k):
+        os.environ.pop(k, None)
+    os.environ[exist_k] = "keep"
+    with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+        f.write(f"# comment line\n{new_k}=hello\n{exist_k}=fromfile\n")
+        path = f.name
+    try:
+        model_client.load_dotenv(path)
+        assert os.environ.get(new_k) == "hello", os.environ.get(new_k)
+        assert os.environ.get(exist_k) == "keep", "must never override"
+    finally:
+        os.unlink(path)
+        os.environ.pop(new_k, None)
+        os.environ.pop(exist_k, None)
+
+
 if __name__ == "__main__":
     tests = sorted((k, v) for k, v in globals().items()
                    if k.startswith("test_") and callable(v))
