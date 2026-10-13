@@ -57,6 +57,7 @@ CFA_TASKS=evals/goldens/v1.jsonl CFA_LIMIT=20 python3 -c "import tests.test_fait
 With pytest installed:
 
 ```bash
+pip install pytest
 pytest --run-eval --limit 20
 ```
 
@@ -96,7 +97,7 @@ M1 gate rule (`tests/test_faithfulness.py`, `report.py`): PASS iff paraphrase `S
 
 | Key | Default | Notes |
 |---|---|---|
-| `default_model` | `ollama/qwen2.5-coder:1.5b` | Also `3b`, `gemma2:2b` local; or `groq/qwen-2.5-coder-32b`, `groq/gemma2-9b-it` with key |
+| `default_model` | `ollama/qwen2.5-coder:1.5b` | Also `3b`, `gemma2:2b` local; or `groq/qwen-qwq-32b`, `groq/gemma2-9b-it`, `groq/llama-3.1-8b-instant` with key; or `google/gemini-3.5-flash-lite`, `google/gemini-2.5-flash` with key |
 | `provider.kind` / `base_url` / `api_key_env` | `ollama`, `http://localhost:11434/v1`, `""` | Groq: `https://api.groq.com/openai/v1` + `GROQ_API_KEY`. Empty = local, nothing sent |
 | `run_tier` | `pr` | `pr` or `nightly` |
 | `concurrency` | `pr: 10, nightly: 20` | Resample uses concurrency 1, seed 7 |

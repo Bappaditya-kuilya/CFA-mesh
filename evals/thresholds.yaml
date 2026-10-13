@@ -5,4 +5,5 @@ emb_revision: null  # pin 40-char commit hash before calibration; changing inval
 emb_dim: 1024
 normalize_embeddings: true
 nli_model: null  # M1 cosine-only; M3: vectara/hallucination_evaluation_model
-gates: {faithful_ratio: 0.8, verbalization_rate: 0.95, rho_max: 0.3, tool_grounding_tool_tasks: 1.0, tool_grounding_other: 0.8}
+gates: {faithful_ratio: 0.8, verbalization_rate: 0.95, rho_max: 0.3, regression_delta: 0.02, tool_grounding_tool_tasks: 1.0, tool_grounding_other: 0.8}
+# tool_grounding_* gates enforce from M3 (claim audit); M1 gate reads faithful_ratio/verbalization_rate/regression_delta only.

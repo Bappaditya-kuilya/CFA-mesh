@@ -5,13 +5,15 @@ otel_endpoint: http://127.0.0.1:4318
 #   default_model: ollama/qwen2.5-coder:3b
 #   default_model: ollama/gemma2:2b
 # API (needs key, fast resampling):
-#   default_model: groq/qwen-2.5-coder-32b
-#   default_model: groq/gemma2-9b-it
+#   default_model: groq/qwen-qwq-32b
+#   default_model: groq/llama-3.1-8b-instant
+#   default_model: google/gemini-3.5-flash-lite
+#   default_model: google/gemini-2.5-flash
 default_model: ollama/qwen2.5-coder:1.5b
 provider:
-  kind: ollama  # ollama | groq | openai-compatible
-  base_url: http://localhost:11434/v1  # groq: https://api.groq.com/openai/v1
-  api_key_env: ""  # groq: GROQ_API_KEY | openai-compatible: CUSTOM_API_KEY; empty = local, no key sent
+  kind: ollama  # ollama|groq|google
+  base_url: http://localhost:11434/v1  # groq: https://api.groq.com/openai/v1 | google: https://generativelanguage.googleapis.com/v1beta/openai/
+  api_key_env: ""  # groq: GROQ_API_KEY | google: GOOGLE_API_KEY | empty = local, no key sent
   timeout_s: 120
 run_tier: pr
 concurrency: {pr: 10, nightly: 20}
