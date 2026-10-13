@@ -201,6 +201,8 @@ def select_tier(tier: str, n_available: int, limit: int | None = None) -> dict:
     """
     if tier not in TIER_POLICY:
         raise ValueError(f"unknown tier {tier!r}; want one of {sorted(TIER_POLICY)}")
+    if limit is not None and limit < 0:
+        raise ValueError(f"limit must be >= 0, got {limit!r}")
     pol = TIER_POLICY[tier]
     if tier == "pr":
         want = pol["tasks"] if limit is None else min(limit, pol["tasks"])

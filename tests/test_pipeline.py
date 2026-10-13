@@ -27,7 +27,7 @@ except ImportError:
 from orchestrator import (BudgetEnforcer, BudgetExceeded, ContentCache,
                           content_cache_key, needs_full_gate, run,
                           select_tier)
-from gate import aggregate, decide_gate, validate_risk_accept
+from gate import aggregate, decide_gate, load_thresholds, validate_risk_accept
 from replay import (assert_identical, build_bundle, canonical, judge_record,
                     replay_bundle)
 from export import build_export, materialize_evidence
@@ -130,6 +130,9 @@ def test_select_tier():
     assert select_tier("pr", 1000, limit=5)["n_tasks"] == 5
     assert select_tier("pr", 1000, limit=50)["n_tasks"] == 20
     assert select_tier("pr", 1000, limit=None)["n_tasks"] == 20
+    for _t in ("pr", "nightly"):
+        try: select_tier(_t, 10, limit=-1); assert False, "negative limit must raise"
+        except ValueError: pass
 
 
 def test_aggregate():
@@ -162,6 +165,7 @@ def test_decide_gate():
     reg = decide_gate(_agg(0.80), base_faithful=0.95, base_ci=None)
     assert reg["decision"] == "BLOCK", reg
     assert reg["delta_vs_base"] is not None and reg["delta_vs_base"] > 0.02
+    assert decide_gate(_agg(0.80), base_faithful=0.95, base_ci=None, overrides=load_thresholds(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "evals", "thresholds.yaml")))["decision"] == "BLOCK"
 
 
 def _ra(now, by="alice", approved_by="bob", ttl_days=7):
@@ -261,6 +265,30 @@ def test_report_custom_out_trace_links_resolve():
         assert len(hrefs) == 2, f"expected 2 trace links, got {hrefs}"
         assert all((pathlib.Path(out).parent / h).resolve().is_file()
                    for h in hrefs), hrefs
+
+
+def test_report_relpath_cross_drive_fallback():
+    import pathlib
+    import report
+    real = os.path.relpath
+    os.path.relpath = lambda *a, **k: (_ for _ in ()).throw(ValueError("cross-drive"))
+    argv = sys.argv[:]
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            rin = os.path.join(d, "in.json")
+            out = os.path.join(d, "sub", "report.html")
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            tdir = os.path.join(d, "traces")
+            rout = os.path.join(d, "results.json")
+            pathlib.Path(rin).write_text(json.dumps([{"task_id": "t1"}]))
+            sys.argv = ["report.py", "--results-in", rin, "--out", out,
+                        "--traces-dir", tdir, "--results-out", rout]
+            report.main()
+            rows = json.loads(pathlib.Path(rout).read_text())
+            assert rows[0]["trace_file"] == str((pathlib.Path(tdir) / "t1.json").resolve()), rows
+    finally:
+        os.path.relpath = real
+        sys.argv = argv
 
 
 def test_model_client_misroute_raises():

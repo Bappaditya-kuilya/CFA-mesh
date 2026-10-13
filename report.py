@@ -161,7 +161,10 @@ def main():
     trace_refs = []
     for r in rows:
         p = write_trace(r, traces_dir)
-        r["trace_file"] = os.path.relpath(p.resolve(), out_path.parent.resolve())
+        try:
+            r["trace_file"] = os.path.relpath(p.resolve(), out_path.parent.resolve())
+        except ValueError:
+            r["trace_file"] = str(p.resolve())
         trace_refs.append(r["trace_file"])
 
     pathlib.Path(args.results_out).write_text(json.dumps(rows, indent=2) + "\n")
