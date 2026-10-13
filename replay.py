@@ -10,6 +10,12 @@ The judge here is the deterministic M1/M3-cosine path
 (verdict.behavior.score_pair + verdict.claims.audit_response +
 verdict.behavior.verbalizes): no network, no sampling, so replay is
 exact. Floats are rounded at creation for repr stability.
+
+P3 determinism: bundles may carry the gate decision (`gate`) plus its
+inputs (`gate_inputs` = {"agg": {...}, **decide_gate kwargs});
+assert_identical re-runs decide_gate on the stored inputs and fails on
+drift. A caller-supplied harness_version must match the bundle's stored
+harness_version exactly (adapter change invalidates replay per F2/F7).
 """
 
 import hashlib
@@ -77,8 +83,14 @@ def judge_record(judge_input, *, tau=None, mode="observational"):
 def build_bundle(*, dataset, thresholds_version, tau=None, model,
                  seed, prompt_hashes, emb_version, nli_version,
                  records, harness_version="m1", scrub_version="l1",
-                 thresholds=None, env=None, git_sha_value=None):
-    """Assemble a replay bundle. records: [{judge_input, verdict}]."""
+                 thresholds=None, env=None, git_sha_value=None,
+                 gate=None, gate_inputs=None):
+    """Assemble a replay bundle. records: [{judge_input, verdict}].
+
+    gate/gate_inputs (optional): stored gate decision dict plus its
+      inputs ({"agg": {...}, **decide_gate kwargs}) so replay can
+      re-run decide_gate and fail on drift.
+    """
     stored = []
     for r in records:
         verdict = r["verdict"] if "verdict" in r else judge_record(
@@ -106,6 +118,8 @@ def build_bundle(*, dataset, thresholds_version, tau=None, model,
                        "platform": platform.platform()},
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "records": stored,
+        "gate": gate,
+        "gate_inputs": gate_inputs,
     }
     bundle["bundle_hash"] = hashlib.sha256(canonical(
         {k: v for k, v in bundle.items() if k != "bundle_hash"})).hexdigest()
@@ -132,8 +146,46 @@ def replay_bundle(bundle, *, tau=None, mode=None):
     return recomputed
 
 
-def assert_identical(bundle, recomputed=None):
-    """Assert byte-identical verdicts. Raises AssertionError on mismatch."""
+_GATE_KWARGS = ("mode", "base_faithful", "base_ci", "has_contradicted",
+                "risk_accept", "now", "overrides", "is_tool_task",
+                "task_type", "tool_grounding_ratio", "verdicts")
+
+
+def assert_gate_identical(bundle, *, recomputed_gate=None):
+    """Re-run decide_gate on stored gate_inputs; fail on drift.
+
+    No-op (True) for bundles without gate+gate_inputs (pre-P3).
+    Raises AssertionError when re-run bytes differ from stored.
+    """
+    stored_gate = bundle.get("gate")
+    inputs = bundle.get("gate_inputs")
+    if stored_gate is None or inputs is None:
+        return True
+    from gate import decide_gate
+    inputs = dict(inputs)
+    agg = dict(inputs.pop("agg", {}))
+    kwargs = {k: inputs[k] for k in _GATE_KWARGS if k in inputs}
+    if recomputed_gate is None:
+        recomputed_gate = decide_gate(agg, **kwargs)
+    if canonical(recomputed_gate) != canonical(stored_gate):
+        raise AssertionError(
+            f"gate drift: stored={canonical(stored_gate).decode()}\n"
+            f" rerun={canonical(recomputed_gate).decode()}")
+    return True
+
+
+def assert_identical(bundle, recomputed=None, *, harness_version=None):
+    """Assert byte-identical verdicts + gate re-run identical.
+
+    harness_version: when given, the bundle's stored harness_version
+      must match exactly. Raises AssertionError on mismatch or drift.
+    """
+    if harness_version is not None \
+            and bundle.get("harness_version") != harness_version:
+        raise AssertionError(
+            f"harness version mismatch: bundle="
+            f"{bundle.get('harness_version')!r} expected="
+            f"{harness_version!r}")
     recomputed = recomputed if recomputed is not None \
         else replay_bundle(bundle)
     stored = bundle.get("records", [])
@@ -148,22 +200,28 @@ def assert_identical(bundle, recomputed=None):
             raise AssertionError(
                 f"record {i} ({new.get('task_id')}) differs:\n"
                 f" stored={want.decode()}\n replay={got.decode()}")
+    assert_gate_identical(bundle)
     return True
 
 
 def main(argv=None):
     argv = list(argv if argv is not None else sys.argv[1:])
     if not argv or argv[0] in ("-h", "--help"):
-        print("usage: python3 replay.py BUNDLE.json [--tau X]")
+        print("usage: python3 replay.py BUNDLE.json [--tau X] "
+              "[--harness-version V]")
         return 2
     path = argv[0]
     tau = None
     if "--tau" in argv:
         tau = float(argv[argv.index("--tau") + 1])
+    harness_version = None
+    if "--harness-version" in argv:
+        harness_version = argv[argv.index("--harness-version") + 1]
     bundle = load_bundle(path)
     recomputed = replay_bundle(bundle, tau=tau)
     try:
-        assert_identical(bundle, recomputed)
+        assert_identical(bundle, recomputed,
+                         harness_version=harness_version)
     except AssertionError as e:
         print(f"REPLAY MISMATCH: {e}")
         return 1

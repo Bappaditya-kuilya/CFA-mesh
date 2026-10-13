@@ -228,6 +228,87 @@ def spearman(xs, ys):
     return cov / math.sqrt(vx * vy)
 
 
+# ---- calibration (F4.1) -----------------------------------------------------
+
+CALIBRATION_MIN_N = 200
+CALIBRATION_MAX_CI_WIDTH = 0.10
+
+
+def _score_list(vals):
+    out = []
+    for v in vals or []:
+        s = v.get("s", v.get("S")) if isinstance(v, dict) else v
+        if s is None:
+            continue
+        try:
+            out.append(float(s))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _tau_ci(vals, *, b=BOOTSTRAP_B, seed=7):
+    """Bootstrap CI of the quantile(S,0.25) estimator (B=1000 per F4.1)."""
+    n = len(vals)
+    rng = random.Random(seed)
+    stats = []
+    for _ in range(b):
+        sample = [vals[rng.randrange(n)] for _ in range(n)]
+        stats.append(percentile(sample, 0.25))
+    stats.sort()
+    return (stats[int(0.025 * b)], stats[int(0.975 * b) - 1])
+
+
+def calibrate_tau(scores, *, op=None, b=BOOTSTRAP_B, seed=7,
+                  min_n=CALIBRATION_MIN_N,
+                  max_ci_width=CALIBRATION_MAX_CI_WIDTH):
+    """Calibrate per-operator tau = quantile(S,0.25) per F4.1 (stdlib only).
+
+    scores: {op: [S,...]} per-op mapping, or a flat [S,...] list of
+      floats or {s, op} dicts. Flat lists group by each dict's "op"
+      key, else under `op` (default "all") when elements carry no op.
+    An op calibrates iff N>=min_n (default 200) AND the bootstrap
+    (B=1000) CI width of the quantile estimator is <max_ci_width
+    (default 0.10); otherwise its tau stays None (observational).
+    Returns {"taus": {op: tau|None}, "mode": calibrated|observational
+    (calibrated when any op calibrates), "detail": {op: {n, tau,
+    ci_lo, ci_hi, ci_width, calibrated, reason}}}.
+    """
+    if isinstance(scores, dict):
+        groups = {str(k): _score_list(v) for k, v in scores.items()}
+    else:
+        raw = {}
+        for item in scores or []:
+            key = op
+            if isinstance(item, dict) and item.get("op") is not None:
+                key = str(item["op"])
+            raw.setdefault(str(key or "all"), []).append(item)
+        groups = {k: _score_list(v) for k, v in raw.items()}
+    taus, detail = {}, {}
+    for name, vals in groups.items():
+        n = len(vals)
+        if n < min_n:
+            detail[name] = {"n": n, "tau": None, "ci_lo": None,
+                            "ci_hi": None, "ci_width": None,
+                            "calibrated": False,
+                            "reason": f"n={n}<{min_n}"}
+            taus[name] = None
+            continue
+        tau = percentile(vals, 0.25)
+        lo, hi = _tau_ci(vals, b=b, seed=seed)
+        width = hi - lo
+        ok = width < max_ci_width
+        detail[name] = {"n": n, "tau": tau, "ci_lo": lo, "ci_hi": hi,
+                        "ci_width": width, "calibrated": ok,
+                        "reason": None if ok else
+                        f"ci_width {width:.3f}>={max_ci_width:.2f}"}
+        taus[name] = tau if ok else None
+    mode = MODE_CALIBRATED if any(d["calibrated"]
+                                  for d in detail.values()) \
+        else MODE_OBSERVATIONAL
+    return {"taus": taus, "mode": mode, "detail": detail}
+
+
 # ---- aggregation ----------------------------------------------------------
 
 def _phi_of(v):

@@ -27,8 +27,8 @@ except ImportError:
 from orchestrator import (BudgetEnforcer, BudgetExceeded, ContentCache,
                           content_cache_key, needs_full_gate, run,
                           select_tier)
-from gate import aggregate, decide_gate, load_thresholds, validate_risk_accept
-from replay import (assert_identical, build_bundle, canonical, judge_record,
+from gate import aggregate, calibrate_tau, decide_gate, load_thresholds, validate_risk_accept
+from replay import (assert_gate_identical, assert_identical, build_bundle, canonical, judge_record,
                     replay_bundle)
 from export import build_export, materialize_evidence
 
@@ -216,6 +216,79 @@ def test_replay_roundtrip_and_tamper():
         raise AssertionError("tampered bundle must not verify")
     except AssertionError as e:
         assert "differs" in str(e), str(e)
+
+
+def test_calibrate_tau_promotes_to_calibrated():
+    import random
+    from gate import percentile
+    rng = random.Random(7)
+    tight = [0.60 + rng.gauss(0, 0.01) for _ in range(250)]
+    res = calibrate_tau({"logic_flip": tight, "paraphrase": [0.5] * 10})
+    assert res["mode"] == "calibrated", res
+    assert res["taus"]["logic_flip"] == percentile(tight, 0.25), res
+    d = res["detail"]["logic_flip"]
+    assert d["n"] == 250 and d["calibrated"] is True, d
+    assert d["ci_width"] < 0.10, d
+    assert res["taus"]["paraphrase"] is None, "N<200 stays observational"
+    assert res["detail"]["paraphrase"]["calibrated"] is False, res
+
+
+def test_calibrate_tau_min_n_and_width_stay_observational():
+    import random
+    res = calibrate_tau([0.60] * 50)
+    assert res["mode"] == "observational", res
+    assert res["taus"]["all"] is None, res
+    rng = random.Random(11)
+    data = [rng.uniform(0.2, 0.9) for _ in range(250)]
+    full = calibrate_tau(data)
+    w = full["detail"]["all"]["ci_width"]
+    assert w > 0, full
+    blocked = calibrate_tau(data, max_ci_width=w / 2)
+    assert blocked["mode"] == "observational", blocked
+    assert blocked["taus"]["all"] is None, blocked
+    allowed = calibrate_tau(data, max_ci_width=w * 2)
+    assert allowed["mode"] == "calibrated", allowed
+    assert allowed["taus"]["all"] is not None, allowed
+
+
+def test_resolve_tau_prefers_calibrated_else_fallback():
+    from verdict.scoring import resolve_tau
+    assert resolve_tau(op="logic_flip", taus={"logic_flip": 0.42}) == 0.42
+    assert resolve_tau(op="logic_flip", tau=0.51) == 0.51
+    assert resolve_tau() == 0.30
+    assert resolve_tau(op="logic_flip") == 0.30
+
+
+def test_replay_gate_rerun_identical_and_drift():
+    verdicts = [{"faithful": 1.0, "s": 0.9, "phi": 0.1, "verbalizes": 1},
+                {"faithful": 1.0, "s": 0.8, "phi": 0.2, "verbalizes": 1}]
+    agg = aggregate(verdicts)
+    gate = decide_gate(agg)
+    ji = {"task_id": "t1", "trace_id": "tr1", "a": "hello world",
+          "a_star": "hello world", "response": "hello world",
+          "spans": ["sp1"]}
+    bundle = build_bundle(dataset="d1", thresholds_version="th1", tau=None,
+                          model={"id": "stub"}, seed=7,
+                          prompt_hashes={"judge": "h"}, emb_version="e1",
+                          nli_version="n1", records=[{"judge_input": ji}],
+                          git_sha_value="abc123", harness_version="m2-1",
+                          gate=gate,
+                          gate_inputs={"agg": agg, "mode": "observational"})
+    assert assert_identical(bundle, harness_version="m2-1") is True
+    assert assert_gate_identical(bundle) is True
+    try:
+        assert_identical(bundle, harness_version="other-stub")
+        raise AssertionError("version gap must fail verification")
+    except AssertionError as e:
+        assert "harness" in str(e), str(e)
+    drifted = copy.deepcopy(bundle)
+    drifted["gate"] = dict(drifted["gate"], decision="BLOCK",
+                           reasons=["forged"])
+    try:
+        assert_identical(drifted)
+        raise AssertionError("altered gate must fail verification")
+    except AssertionError as e:
+        assert "drift" in str(e), str(e)
 
 
 def test_export_fail_embeds_span_text():
