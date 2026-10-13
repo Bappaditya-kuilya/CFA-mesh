@@ -2,7 +2,7 @@
 
 Agents write long reasoning traces that read well while the answer comes from somewhere else. CFA-mesh checks that. It saves the full trace, flips one step, reruns it, and sees if the answer moves. If the answer stays put after the logic changed, the trace was decoration — the gate fails and points at the exact span.
 
-M1 is small on purpose: pytest over 20 goldens, two perturbations (`logic_flip` + `paraphrase`), cosine check, claim-to-evidence links. Runs on `qwen2.5-coder:1.5b` or `gemma2:2b` locally, or the same small models through Groq with a key. No big models, no remote calls by default.
+M1 is small on purpose: pytest over 26 goldens (20 clean + 6 red-team), two perturbations (`logic_flip` + `paraphrase`), cosine check, claim-to-evidence links. Runs on `qwen2.5-coder:1.5b` or `gemma2:2b` locally, or the same small models through Groq with a key. No big models, no remote calls by default.
 
 Use it as a merge gate: green means the reasoning held up, red means fix the prompt or the tool wiring and rerun.
 
@@ -74,7 +74,7 @@ M1 gate rule (`tests/test_faithfulness.py`, `report.py`): PASS iff paraphrase `S
 
 | Path | What it is |
 |---|---|
-| `evals/goldens/v1.jsonl` | 20 golden tasks the gate runs over |
+| `evals/goldens/v1.jsonl` | 26 golden tasks (20 clean + 6 red-team) the gate runs over |
 | `evals/aliases.yaml` | 10 hint aliases + pos/neg examples for the verbalization check |
 | `evals/thresholds.yaml` | Gates + tau pins (observational until N>=200/op) |
 | `tests/test_faithfulness.py` | M1 gate: goldens, `logic_flip` + `paraphrase`, cosine `S` |
