@@ -33,6 +33,11 @@ BUDGETS = {
     "run_cap_usd": {"pr": 2.0, "nightly": 20.0},
 }
 
+# P4 live cost estimate: conservative API rate ($0.50 / 1M tokens).
+# Local ollama resampling meters $0 (no billed spend); hosted calls accrue
+# total_tokens * LIVE_COST_USD_PER_TOKEN into BudgetEnforcer via add_spend.
+LIVE_COST_USD_PER_TOKEN = 0.5e-6
+
 # F2 path-filter: full gate ONLY on prompt/agent/tool-schema changes.
 # Anything else (docs, tests, infra) runs the cheap skip path.
 FULL_GATE_PATTERNS = (
@@ -59,19 +64,22 @@ def content_cache_key(model_id: str = "", sys_prompt_hash: str = "",
                       tools_schema_hash: str = "", rag_corpus_version: str = "",
                       task_id: str = "", branch_config: str = "",
                       git_sha: str = "", harness_version: str = HARNESS_VERSION,
-                      nli_version: str = "", thresholds_version: str = "") -> str:
-    """F2 content cache key.
+                      nli_version: str = "", thresholds_version: str = "",
+                      seed: int = 7) -> str:
+    """F2 content cache key (+ F3 seed decode param).
 
     sha256(model_id|sys_prompt_hash|user_template_hash|temp|tools_schema_hash|
            rag_corpus_version|task_id|branch_config|git_sha|harness_version|
-           nli_version|thresholds_version).
+           nli_version|thresholds_version|seed).
     Any of the 6 triggers (model, prompt template, tool schema, corpus,
     system prompt, user state) changes the key -> automatic invalidation.
+    temp/seed are decode params (F3: temperature=0, seed=7): any change
+    re-resamples instead of reusing a cached verdict.
     """
     joined = "|".join(str(p) for p in (
         model_id, sys_prompt_hash, user_template_hash, temp,
         tools_schema_hash, rag_corpus_version, task_id, branch_config,
-        git_sha, harness_version, nli_version, thresholds_version))
+        git_sha, harness_version, nli_version, thresholds_version, seed))
     return sha256_str(joined)
 
 
@@ -216,18 +224,65 @@ def select_tier(tier: str, n_available: int, limit: int | None = None) -> dict:
             "concurrent": pol["concurrent"], "cache": True}
 
 
+def _has_model_key() -> bool:
+    """True when a hosted-model key is exported in env (live path allowed).
+
+    GOOGLE_API_KEY / GROQ_API_KEY in os.environ only; .env is NOT read
+    here so a checked-in placeholder .env can never flip a run to live.
+    No key -> stub compute (today's behavior, zero network).
+    """
+    return bool(os.environ.get("GOOGLE_API_KEY")
+                or os.environ.get("GROQ_API_KEY"))
+
+
+def _live_compute_for(model_id: str, temp: float = 0.0, seed: int = 7,
+                      max_tokens: int = 512):
+    """Build compute(task, branch) over complete_with_usage (stdlib only).
+
+    Maps usage -> compute shape: tokens = tokens_in + tokens_out,
+    cost estimated via LIVE_COST_USD_PER_TOKEN ($0 for local ollama),
+    elapsed_s straight from the client. The caller's check_trace /
+    add_spend then meters live spend and aborts budget_exceeded.
+    Module-attribute call (not from-import) so tests can monkeypatch
+    adapters.model_client.complete_with_usage.
+    """
+    from adapters import model_client
+
+    def live(task: dict, branch_idx: int) -> dict:
+        prompt = task.get("input", task.get("prompt", task.get("task_id", "")))
+        usage = model_client.complete_with_usage(
+            model_id, str(prompt), temperature=temp, seed=seed,
+            max_tokens=max_tokens)
+        total = int(usage.get("tokens_in", 0) or 0) \
+            + int(usage.get("tokens_out", 0) or 0)
+        kind = model_id.split("/")[0] if "/" in model_id else ""
+        cost = 0.0 if kind in ("ollama", "stub", "") \
+            else total * LIVE_COST_USD_PER_TOKEN
+        return {"output": usage.get("text", ""), "tokens": total,
+                "cost_usd": cost, "elapsed_s": usage.get("elapsed_s", 0.0)}
+    return live
+
+
 def run(tasks: list[dict], tier: str = "pr", limit: int | None = None,
         changed_files: list[str] | None = None,
         cache: ContentCache | None = None,
         budgets: BudgetEnforcer | None = None,
         git_sha: str = "", model_id: str = "stub",
-        compute=None) -> dict:
+        compute=None, temp: float = 0.0, seed: int = 7,
+        sys_prompt_hash: str = "", user_template_hash: str = "",
+        tools_schema_hash: str = "", rag_corpus_version: str = "",
+        nli_version: str = "", thresholds_version: str = "",
+        max_tokens: int = 512) -> dict:
     """Tiered run with cache-hit-skip + budget enforcement.
 
     compute(task, branch_idx) -> {"output": str, "tokens": int,
-        "cost_usd": float, "elapsed_s": float}. Default stub echoes the
-    golden's expected_output at zero cost (no network, M1-style).
-    Returns {"results": [...], "cache_hit_rate": float, "spent_usd": float}.
+        "cost_usd": float, "elapsed_s": float}. Explicit compute always
+    wins. Default: live resampling via complete_with_usage when a model
+    key (GOOGLE_API_KEY/GROQ_API_KEY) is exported AND model_id != "stub";
+    otherwise the stub echoes the golden's expected_output at zero cost
+    (no network, M1-style). temp/seed (F3 defaults 0/7) feed both the
+    live call and the cache key. Returns {"results": [...],
+    "cache_hit_rate": float, "spent_usd": float}.
     """
     plan = select_tier(tier, len(tasks), limit)
     if changed_files is not None and not needs_full_gate(changed_files):
@@ -236,9 +291,14 @@ def run(tasks: list[dict], tier: str = "pr", limit: int | None = None,
                 "cache_hit_rate": 0.0, "spent_usd": 0.0}
     cache = cache or ContentCache(enabled=True)
     budgets = budgets or BudgetEnforcer(tier=tier)
-    compute = compute or (lambda task, b: {
-        "output": task.get("expected_output", ""), "tokens": 10,
-        "cost_usd": 0.0, "elapsed_s": 0.0})
+    if compute is None:
+        if model_id != "stub" and _has_model_key():
+            compute = _live_compute_for(model_id, temp=temp, seed=seed,
+                                        max_tokens=max_tokens)
+        else:
+            compute = (lambda task, b: {
+                "output": task.get("expected_output", ""), "tokens": 10,
+                "cost_usd": 0.0, "elapsed_s": 0.0})
 
     chosen = tasks[:plan["n_tasks"]]
     results = []
@@ -246,8 +306,13 @@ def run(tasks: list[dict], tier: str = "pr", limit: int | None = None,
         tid = task.get("task_id", "?")
         for b in range(plan["branches"]):
             key = content_cache_key(
-                model_id=model_id, task_id=tid, branch_config=f"branch_{b}",
-                git_sha=git_sha, harness_version=HARNESS_VERSION)
+                model_id=model_id, sys_prompt_hash=sys_prompt_hash,
+                user_template_hash=user_template_hash, temp=temp,
+                tools_schema_hash=tools_schema_hash,
+                rag_corpus_version=rag_corpus_version, task_id=tid,
+                branch_config=f"branch_{b}", git_sha=git_sha,
+                harness_version=HARNESS_VERSION, nli_version=nli_version,
+                thresholds_version=thresholds_version, seed=seed)
             hit = cache.get(key)  # DeepEval pattern: lookup first, skip compute on hit
             if hit is not None:
                 results.append({"task_id": tid, "branch": b,
@@ -323,6 +388,58 @@ def demo() -> None:
     assert not needs_full_gate(["README.md"])
     assert needs_full_gate(["agents/judge.py"])
     assert needs_full_gate(["schemas/tools.json"])
+
+    print("== live path (stubbed client, no network) ==")
+    from adapters import model_client as _mc
+    real_complete = _mc.complete_with_usage
+
+    def _fake_complete(model, prompt, **kw):
+        assert kw.get("temperature") == 0.0 and kw.get("seed") == 7, kw
+        return {"text": f"live:{prompt}", "tokens_in": 5000,
+                "tokens_out": 3000, "elapsed_s": 1.5}
+
+    old_key = os.environ.get("GOOGLE_API_KEY")
+    os.environ["GOOGLE_API_KEY"] = "demo-sentinel"
+    _mc.complete_with_usage = _fake_complete
+    try:
+        ltasks = [{"task_id": "live0", "input": "say hi"}]
+        live_budgets = BudgetEnforcer(tier="pr")
+        lc = os.path.join(tempfile.mkdtemp(), "live.jsonl")
+        rl = run(ltasks, tier="pr", cache=ContentCache(path=lc),
+                 budgets=live_budgets, model_id="google/gemini-2.5-flash")
+        assert all(r.get("cached") is False for r in rl["results"]), rl
+        assert live_budgets.spent_usd > 0, "live usage must meter spend"
+        assert rl["results"][0]["output"] == "live:say hi", rl["results"][0]
+        # temp+seed in key: same inputs hit, any decode change misses
+        kA = content_cache_key(model_id="m", task_id="t",
+                               branch_config="b0", temp=0.0, seed=7)
+        assert kA == content_cache_key(model_id="m", task_id="t",
+                                       branch_config="b0", temp=0.0, seed=7)
+        assert kA != content_cache_key(model_id="m", task_id="t",
+                                       branch_config="b0", temp=0.5, seed=7)
+        assert kA != content_cache_key(model_id="m", task_id="t",
+                                       branch_config="b0", temp=0.0, seed=8)
+        r_hit = run(ltasks, tier="pr", cache=ContentCache(path=lc),
+                    budgets=BudgetEnforcer(tier="pr"),
+                    model_id="google/gemini-2.5-flash")
+        assert all(r.get("cached") for r in r_hit["results"]), "repeat must hit"
+        print("live spend=$%.6f results=%d repeat_all_cached=True"
+              % (live_budgets.spent_usd, len(rl["results"])))
+        # no key -> stub again even with a live model_id
+        del os.environ["GOOGLE_API_KEY"]
+        rs = run(ltasks, tier="pr",
+                 cache=ContentCache(
+                     path=os.path.join(tempfile.mkdtemp(), "s.jsonl")),
+                 model_id="google/gemini-2.5-flash")
+        assert rs["spent_usd"] == 0.0 and \
+            rs["results"][0]["output"] == "", rs  # stub: no expected_output
+        print("no-key falls back to stub: OK")
+    finally:
+        _mc.complete_with_usage = real_complete
+        if old_key is None:
+            os.environ.pop("GOOGLE_API_KEY", None)
+        else:
+            os.environ["GOOGLE_API_KEY"] = old_key
     print("demo OK")
 
 
@@ -336,6 +453,11 @@ def main(argv=None) -> int:
                     help="comma-separated changed files for path-filter")
     ap.add_argument("--git-sha", default=os.environ.get("GIT_SHA", ""))
     ap.add_argument("--model", default="stub")
+    ap.add_argument("--temp", type=float, default=0.0,
+                    help="resample temperature (F3 default 0.0; part of cache key)")
+    ap.add_argument("--seed", type=int, default=7,
+                    help="resample seed (F3 default 7; part of cache key)")
+    ap.add_argument("--max-tokens", type=int, default=512)
     args = ap.parse_args(argv)
 
     try:
@@ -348,7 +470,8 @@ def main(argv=None) -> int:
     try:
         out = run(tasks, tier=args.tier, limit=args.limit,
                   changed_files=changed, git_sha=args.git_sha,
-                  model_id=args.model)
+                  model_id=args.model, temp=args.temp, seed=args.seed,
+                  max_tokens=args.max_tokens)
     except BudgetExceeded as e:
         print(json.dumps({"verdict": "FAIL", "reason": str(e)}))
         return 1
