@@ -10,6 +10,7 @@ SMALL_MODELS = {
     "ollama/qwen2.5-coder:3b": {"kind": "ollama", "ctx": 32768},
     "ollama/gemma2:2b": {"kind": "ollama", "ctx": 8192},
     "groq/qwen-qwq-32b": {"kind": "groq", "ctx": 32768},
+    "groq/qwen-2.5-coder-32b": {"kind": "groq", "ctx": 32768},  # back-compat alias for existing cfa.yaml users
     "groq/llama-3.1-8b-instant": {"kind": "groq", "ctx": 8192},
     "google/gemini-3.5-flash-lite": {"kind": "google", "ctx": 32768},
     "google/gemini-2.5-flash": {"kind": "google", "ctx": 32768},

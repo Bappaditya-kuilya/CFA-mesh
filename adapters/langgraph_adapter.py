@@ -30,10 +30,6 @@ HARNESS_VERSION = "langgraph-stub-v0"
 HARNESS_NAME = "langgraph"
 
 
-def _prompt_for(task: dict) -> str:
-    return str(task.get("input", task.get("prompt", "")))
-
-
 class HarnessAdapter:
     """Faithful LangGraph adapter interface (stub)."""
 
@@ -64,7 +60,7 @@ class HarnessAdapter:
             base_url=str(env.get("base_url", "")),
             api_key_env=str(env.get("api_key_env", "")),
         )
-        _prompt_for(task)  # prompt construction is real; graph invoke is stubbed
+        str(task.get("input", task.get("prompt", "")))  # prompt construction is real; graph invoke is stubbed
         trace_id = str(uuid.uuid4())
         try:
             import langgraph  # type: ignore # noqa: F401

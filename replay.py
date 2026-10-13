@@ -35,10 +35,6 @@ def git_sha(cwd="."):
         return "unknown"
 
 
-def sha256_text(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def canonical(obj):
     """Canonical bytes for equality: sorted keys, compact, utf-8."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"),
@@ -111,9 +107,8 @@ def build_bundle(*, dataset, thresholds_version, tau=None, model,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "records": stored,
     }
-    bundle["bundle_hash"] = sha256_text(
-        canonical({k: v for k, v in bundle.items()
-                   if k != "bundle_hash"}).decode("ascii"))
+    bundle["bundle_hash"] = hashlib.sha256(canonical(
+        {k: v for k, v in bundle.items() if k != "bundle_hash"})).hexdigest()
     return bundle
 
 

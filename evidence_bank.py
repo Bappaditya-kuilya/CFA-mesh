@@ -38,11 +38,6 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def content_hash(content: str) -> str:
-    """sha256 hex of the evidence content (used for cited_hashes)."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
 def ensure_bank(conn: sqlite3.Connection) -> None:
     """Create the evidence_bank table/indexes if missing (idempotent)."""
     conn.executescript(BANK_SCHEMA)
@@ -70,7 +65,7 @@ def pin_evidence(target, task_id: str, kind: str, content: str,
         "evidence_id": evidence_id or f"ev_{uuid.uuid4().hex[:12]}",
         "task_id": task_id,
         "kind": kind,
-        "content_hash": content_hash(content),
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "content": content,
         "pinned_at": _now(),
     }

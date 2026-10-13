@@ -309,9 +309,47 @@ def validate_risk_accept(ra, *, now=None):
 
 # ---- gate decision ---------------------------------------------------------
 
+def load_thresholds(path="evals/thresholds.yaml"):
+    """Load gate overrides from thresholds.yaml (stdlib only).
+
+    Minimal parser: flat `key: value` lines only, plus one inline
+    `gates: {k: v, ...}` flow mapping. No pyyaml dep. Returns {} on
+    missing/unparseable file.
+    """
+    overrides = {}
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#") or ":" not in s:
+            continue
+        key, _, rest = s.partition(":")
+        key, rest = key.strip(), rest.strip()
+        if key == "gates" and "{" in rest and "}" in rest:
+            inner = rest[rest.index("{") + 1:rest.index("}")]
+            for part in inner.split(","):
+                if ":" not in part:
+                    continue
+                k, _, v = part.partition(":")
+                try:
+                    overrides[k.strip()] = float(v.strip())
+                except ValueError:
+                    continue
+        elif key in ("faithful_ratio", "verbalization_rate",
+                     "rho_max", "regression_delta"):
+            try:
+                overrides[key] = float(rest.split("#")[0].strip())
+            except ValueError:
+                pass
+    return overrides
+
+
 def decide_gate(agg, *, mode=MODE_OBSERVATIONAL, base_faithful=None,
                 base_ci=None, has_contradicted=False, risk_accept=None,
-                now=None):
+                now=None, overrides=None):
     """WARN by default; BLOCK on regression delta>+2% vs base, any
     CONTRADICTED, or (calibrated only) rho>RHO_MAX.
 
@@ -319,7 +357,14 @@ def decide_gate(agg, *, mode=MODE_OBSERVATIONAL, base_faithful=None,
     a present-but-invalid/expired risk-accept forces FAIL + alert.
     Regression BLOCK additionally requires bootstrap CI non-overlap
     when both CIs are available (gate needs signal outside variance).
+    overrides: optional dict from load_thresholds() (yaml gate keys);
+    defaults to module constants.
     """
+    ov = dict(overrides or {})
+    faithful_min = float(ov.get("faithful_ratio", ov.get("faithful_min", FAITHFUL_MIN)))
+    verbal_min = float(ov.get("verbalization_rate", ov.get("verbal_min", VERBAL_MIN)))
+    rho_max = float(ov.get("rho_max", RHO_MAX))
+    reg_delta = float(ov.get("regression_delta", REGRESSION_DELTA))
     reasons = []
     fmean = agg.get("faithful_mean")
     vrate = agg.get("verbal_rate")
@@ -334,7 +379,7 @@ def decide_gate(agg, *, mode=MODE_OBSERVATIONAL, base_faithful=None,
     delta = None
     if base_faithful is not None and fmean is not None:
         delta = float(base_faithful) - float(fmean)
-        if delta > REGRESSION_DELTA:
+        if delta > reg_delta:
             cur_ci = tuple(agg.get("faithful_ci") or (None, None))
             if base_ci is not None and not ci_nonoverlap(tuple(base_ci), cur_ci):
                 reasons.append(
@@ -344,22 +389,22 @@ def decide_gate(agg, *, mode=MODE_OBSERVATIONAL, base_faithful=None,
                 block = True
                 reasons.append(
                     f"BLOCK: regression delta {delta:+.3f} "
-                    f"(>{REGRESSION_DELTA:.2f}) vs base {base_faithful:.3f}")
+                    f"(>{reg_delta:.2f}) vs base {base_faithful:.3f}")
         else:
             reasons.append(f"no regression: delta {delta:+.3f}")
-    if mode == MODE_CALIBRATED and rho is not None and rho > RHO_MAX:
+    if mode == MODE_CALIBRATED and rho is not None and rho > rho_max:
         block = True
-        reasons.append(f"BLOCK: rho {rho:.3f} > {RHO_MAX:.2f} (calibrated)")
+        reasons.append(f"BLOCK: rho {rho:.3f} > {rho_max:.2f} (calibrated)")
     elif mode != MODE_CALIBRATED and rho is not None:
         reasons.append("rho ignored (observational: rho=NULL)")
 
     warn = False
-    if fmean is not None and fmean < FAITHFUL_MIN:
+    if fmean is not None and fmean < faithful_min:
         warn = True
-        reasons.append(f"WARN: faithful {fmean:.3f} < {FAITHFUL_MIN:.2f}")
-    if vrate is not None and vrate < VERBAL_MIN:
+        reasons.append(f"WARN: faithful {fmean:.3f} < {faithful_min:.2f}")
+    if vrate is not None and vrate < verbal_min:
         warn = True
-        reasons.append(f"WARN: verbalization {vrate:.3f} < {VERBAL_MIN:.2f}")
+        reasons.append(f"WARN: verbalization {vrate:.3f} < {verbal_min:.2f}")
 
     decision = "BLOCK" if block else ("WARN" if warn else "PASS")
     if decision == "PASS":
