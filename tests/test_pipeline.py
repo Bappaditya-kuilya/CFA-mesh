@@ -126,6 +126,10 @@ def test_select_tier():
     assert ng["branches"] == 7, ng
     assert ng["concurrent"] == 20, ng
     assert select_tier("nightly", 1000, limit=50)["n_tasks"] == 50
+    # --limit parity: pr honors explicit limit up to cap 20, else default 20
+    assert select_tier("pr", 1000, limit=5)["n_tasks"] == 5
+    assert select_tier("pr", 1000, limit=50)["n_tasks"] == 20
+    assert select_tier("pr", 1000, limit=None)["n_tasks"] == 20
 
 
 def test_aggregate():
@@ -237,6 +241,26 @@ def test_export_fail_embeds_span_text():
     assert rows["t2"]["fail_evidence"] == [], "PASS must carry none"
     assert "telescope reading 42" in out["markdown"], out["markdown"]
     assert "telescope reading 42" in out["jsonl"], "jsonl must embed spans"
+
+
+def test_report_custom_out_trace_links_resolve():
+    import pathlib
+    import re
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "sub", "report.html")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        tdir = os.path.join(d, "traces_custom")
+        res = os.path.join(d, "results.json")
+        subprocess.run([sys.executable, os.path.join(root, "report.py"),
+                        "--limit", "2", "--out", out, "--traces-dir", tdir,
+                        "--results-out", res],
+                       cwd=root, check=True, capture_output=True, text=True)
+        hrefs = re.findall(r'href="([^"]+\.json)"', pathlib.Path(out).read_text())
+        assert len(hrefs) == 2, f"expected 2 trace links, got {hrefs}"
+        assert all((pathlib.Path(out).parent / h).resolve().is_file()
+                   for h in hrefs), hrefs
 
 
 if __name__ == "__main__":

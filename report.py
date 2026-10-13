@@ -17,6 +17,7 @@ import argparse
 import datetime
 import html
 import json
+import os
 import pathlib
 import re
 import uuid
@@ -160,12 +161,7 @@ def main():
     trace_refs = []
     for r in rows:
         p = write_trace(r, traces_dir)
-        try:
-            r["trace_file"] = str(p.relative_to(out_path.parent.resolve()
-                                                if out_path.parent.exists()
-                                                else pathlib.Path(".")))
-        except ValueError:
-            r["trace_file"] = str(p)
+        r["trace_file"] = os.path.relpath(p.resolve(), out_path.parent.resolve())
         trace_refs.append(r["trace_file"])
 
     pathlib.Path(args.results_out).write_text(json.dumps(rows, indent=2) + "\n")

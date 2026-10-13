@@ -196,12 +196,15 @@ def select_tier(tier: str, n_available: int, limit: int | None = None) -> dict:
     """Resolve tier -> concrete run plan (task count, branches, concurrency).
 
     PR caps at 20 tasks; nightly defaults to --limit 200, hard max 1000.
+    limit=None means tier default (pr 20, nightly 200); explicit limit
+    is honored up to the tier cap (pr 20, nightly 1000).
     """
     if tier not in TIER_POLICY:
         raise ValueError(f"unknown tier {tier!r}; want one of {sorted(TIER_POLICY)}")
     pol = TIER_POLICY[tier]
     if tier == "pr":
-        n_tasks = min(pol["tasks"], n_available)
+        want = pol["tasks"] if limit is None else min(limit, pol["tasks"])
+        n_tasks = min(want, n_available)
         branches = pol["branches"]
     else:
         want = pol["limit"] if limit is None else limit
@@ -324,7 +327,8 @@ def demo() -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="M2 tiered CFA run (stdlib only)")
     ap.add_argument("--tier", default="pr", choices=sorted(TIER_POLICY))
-    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--limit", type=int, default=None,
+                      help="task cap; None = tier default (pr 20, nightly 200)")
     ap.add_argument("--tasks", default="evals/goldens/v1.jsonl")
     ap.add_argument("--changed", default="",
                     help="comma-separated changed files for path-filter")
